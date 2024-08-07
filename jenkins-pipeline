@@ -1,0 +1,80 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_HUB_REPO = "pantalagopichand/hotstar"   
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                // Checkout the code from the GitLab repository
+                git credentialsId: 'Gitlabcreds', url: 'http://192.168.11.251/Gopichand.pantala/Hotstar.git', branch: 'master'
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                catchError(buildResult: 'FAILURE') {
+                    sh '/opt/sonar-scanner/bin/sonar-scanner \
+                        -Dsonar.projectKey=hotstar \
+                        -Dsonar.sources=. \
+                        -Dsonar.host.url=http://10.10.1.5:9000 \
+                        -Dsonar.login=squ_6a93408611b7b227beac11c097ebbc1c783d3596'
+                }
+            }
+        }
+        stage('Build and Push to Docker Hub') {
+            steps {
+                script {
+                    // Build Docker image with Jenkins build number as tag
+                    sh "docker build -t ${DOCKER_HUB_REPO}:${BUILD_NUMBER} ."
+                    
+                    // Tag the image for Docker Hub
+                    sh "docker tag ${DOCKER_HUB_REPO}:${BUILD_NUMBER} ${DOCKER_HUB_REPO}:latest"
+                    
+                    // Use Docker Hub credentials stored in Jenkins
+                    withCredentials([usernamePassword(credentialsId: 'DockerHub-Creds', usernameVariable: 'DOCKER_HUB_USERNAME', passwordVariable: 'DOCKER_HUB_PASSWORD')]) {
+                        // Login to Docker Hub
+                        sh "echo ${DOCKER_HUB_PASSWORD} | docker login -u ${DOCKER_HUB_USERNAME} --password-stdin"
+                        
+                        // Push the image to Docker Hub
+                        sh "docker push ${DOCKER_HUB_REPO}:${BUILD_NUMBER}"
+                        sh "docker push ${DOCKER_HUB_REPO}:latest"
+                    }
+                    
+                    // Clean up local Docker images
+                    sh "docker rmi -f ${DOCKER_HUB_REPO}:${BUILD_NUMBER}"
+                    sh "docker rmi -f ${DOCKER_HUB_REPO}:latest"
+                }
+            }
+        }
+        stage('Deploy to Kubernetes using Helm') {
+            steps {
+                script {
+                    // Set Kubernetes kubeconfig
+                    def kubeconfigPath = credentials('kubeconfig-id')
+                    withEnv(["KUBECONFIG=${kubeconfigPath}"]) {
+                        // Deploy using Helm
+                        sh "microk8s helm3 package hotstar-helm"
+                        sh "microk8s helm3 upgrade --install hotstar-release hotstar-helm-0.1.0.tgz --set image.tag=${BUILD_NUMBER}"
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            // Success notification
+            emailext subject: "Jenkins Build Success: ${currentBuild.fullDisplayName}",
+                     body: "Deployment successful! Jenkins build number: ${currentBuild.number}",
+                     to: "gopichand.pantala@pennywisesolutions.com"
+        }
+        failure {
+            // Failure notification
+            emailext subject: "Jenkins Build Failure: ${currentBuild.fullDisplayName}",
+                     body: "Deployment failed! Jenkins build number: ${currentBuild.number}",
+                     to: "gopichand.pantala@pennywisesolutions.com"
+        }
+    }
+}
